@@ -1,5 +1,5 @@
 from frastpy2 import FlatReaderCached, EnvOptions
-from utils import transform_points_epsg, Earth
+from sortho.utils.geo import transform_points_epsg, Earth
 import torch, numpy as np
 
 from .utils import *
@@ -39,7 +39,7 @@ TODO: Write a custom pytorch (gpu capable) EPSG 4978 -> 4326 function.
 
 class DtedRayMarcher:
     # def __init__(self, dtedPath, alpha=.9, iters=20):
-    def __init__(self, dtedPath, alpha=.95, iters=40, device=None):
+    def __init__(self, dtedPath, alpha=.95, iters=40, tol=.5, device=None):
         eopts = EnvOptions()
         eopts.isTerrain = True
         eopts.cache = True
@@ -47,11 +47,14 @@ class DtedRayMarcher:
         self.alpha = alpha
         self.iters = iters
         self.device = device
+        self.tol = tol
         self.DT = torch.float64
 
     '''
     Input `eye` is in ECEF.
     `R_ltp_from_body` is ltp/enu world_from_camera.
+
+    Return ECEF points for each input `uv`.
     '''
     def march(self, eye, R_ltp_from_body, uvs):
         d = self.device
@@ -101,8 +104,8 @@ class DtedRayMarcher:
                 print(f'                step[{i:>2d}] rpts moved:', dd)
                 rpts = rpts1
 
-                if (abs(dd) < .5).all():
-                    print(f' - early stop, all changes pretty small')
+                if (abs(dd) < self.tol).all():
+                    print(f' - early stop, all changes smaller then self.tol ({self.tol})')
                     break
 
         return rpts
@@ -110,7 +113,7 @@ class DtedRayMarcher:
     def sample_dted(self, ecef_positions, size=256):
         d = self.device
 
-        from utils_torch import torch_ecef_to_wm
+        from sortho.utils.torch_geo import torch_ecef_to_wm
         if USE_CUSTOM_REPROJECTION_TRANSFORM:
             wm_positions = torch_ecef_to_wm(ecef_positions)
         else:
@@ -124,6 +127,8 @@ class DtedRayMarcher:
         dimg = self.dted.rasterIo(tlbr_wm.cpu().numpy(), size,size, 1)
         dimg = dimg.astype(np.float32) / 8
         dimg = torch.from_numpy(dimg)
+        # dimg = dimg.flip(0)
+        # print(dimg.shape)
         # print(f' - read dted range: {dimg.min()} -> {dimg.max()}')
         return wm_positions.to(d), tlbr_wm.to(d), dimg.to(d)
 

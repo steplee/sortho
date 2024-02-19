@@ -1,10 +1,10 @@
 from .base import *
-from utils import transform_points_epsg
+from sortho.utils.geo import transform_points_epsg
 
 # Unbelievably, flatbuffers generated python code uses a non-relative import, and requires adding the generated package directly to path.
 # It cannot be tucked away inside an outer package like I wanted it to be..
 import pyirn
-from pyirn.analysis.read_write import Reader, Asd, SourceFrame, JpegSourceFrame, CameraModel, Quatf
+from pyirn.analysis.read_write import Reader, Asd, SourceFrame, JpegSourceFrame, CameraModel, Quatf, AsdSource
 import sys
 pyirn_path = os.path.dirname(pyirn.__file__)
 sys.path.append(pyirn_path)
@@ -18,7 +18,7 @@ def createIntrinFromCamModel(c):
 
 # Recall that all terrapixel platform orientations are stored in "RWF" coordinates.
 # I want `orthoRectify` coordinates in ENU, however.
-from q import q_mult, q_exp, q_to_matrix
+from sortho.utils.q import q_mult, q_exp, q_to_matrix
 enu_from_rwf_ = q_exp(np.array((-np.pi*.5,0,0)))
 def q_enu_from_rwf(a):
     return q_mult(enu_from_rwf_, a)
@@ -47,7 +47,13 @@ class TerraPixelLoader(BaseLoader):
             if Ty == Asd:
                 asd = Ty()
                 asd.Init(buf, sz)
-                self.lastAsd = asd
+
+                src = asd.Source()
+                if src == AsdSource.ePred and (self.lastAsd is None or asd.Htstamp() > self.lastAsd.Htstamp() + 5_000_000):
+                    print(' - Warning: using Asd with "pred" source because self.lastAsd is null or 5 seconds old.')
+                    self.lastAsd = asd
+                elif src == AsdSource.eGnss:
+                    self.lastAsd = asd
 
             if self.lastAsd is not None and Ty == JpegSourceFrame:
 
@@ -59,11 +65,14 @@ class TerraPixelLoader(BaseLoader):
 
                 # Get posePrior
                 posWgs = self.lastAsd.PosAsNumpy()[None]
-                posEcef = transform_points_epsg(4326, 4978, posWgs)
+                posEcef = transform_points_epsg(4326, 4978, posWgs)[0]
                 pq_rwf = decodeQuat(self.lastAsd.Pq)
                 pq_enu = q_enu_from_rwf(pq_rwf)
                 pp = PoseEcef(posEcef, pq_enu)
-                pp_sigmas = np.concatenate((np.full((8,), 3), np.full((3,),.001)))
+                pos_sigma = np.full((8,), 3)
+                pos_sigma = self.lastAsd.PosSigma()
+                print('pos_sigma', pos_sigma)
+                pp_sigmas = np.concatenate((pos_sigma, np.full((3,),.001)))
 
                 return FrameWithPosePrior(frame, pp, pp_sigmas)
 

@@ -1,4 +1,4 @@
-from .utils import *
+from sortho.utils.geo import *
 from .ray_march_dted import *
 
 '''
@@ -67,6 +67,7 @@ class DtedRayMarcherDebugger(DtedRayMarcher):
 
         cimg = self.colorDset.rasterIo(tlbr_wm.cpu().numpy(), WW,HH, 3)
         cimg = torch.from_numpy(cimg)
+        # cimg = cimg.flip(0)
         return tlbr_wm.to(d), cimg.to(d)
 
     def sample_color_and_sample_points(self, wm_positions, H, W):
