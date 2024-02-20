@@ -12,15 +12,17 @@ def approx_resolution(gs, imgs, frameHWs):
 # NOTE: Zero has the special value that should be KEPT zero after any blurs or anything.
 def form_masks_by_closest_to_center(srcGrids, imgs, frameHWs):
     tileSize = imgs.shape[-1]
-    # print(srcGrids.shape, len(imgs), frameHWs.shape)
-    res = approx_resolution(srcGrids, imgs, frameHWs)
 
     d = srcGrids.norm(dim=-1)
 
-    score_res = .5 / (1 + .5*abs(res-1))
     score_d   = (-d*2).exp()
     # print(res, score_res, score_d)
-    score = score_d #+ score_res
+    score = score_d
+
+    if 0:
+        res = approx_resolution(srcGrids, imgs, frameHWs)
+        score_res = .5 / (1 + .5*abs(res-1))
+        score = score + score_res
 
 
     # print('imgs',imgs.shape)

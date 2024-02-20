@@ -104,37 +104,41 @@ class OrthoRectifier:
         # `do_one_tile` supports padding (which will be useful for blending while individual tiles)
         # Unless trying to process individual tiles, `do_several_tiles` is faster and should be used
         #
-        if 0:
-            dimg = torch.zeros((TILE_SIZE*wm_tiles_sz[1], TILE_SIZE*wm_tiles_sz[0], 3), dtype=torch.uint8)
+        for i in range(2):
+            if i==0:
+                dimg = torch.zeros((TILE_SIZE*wm_tiles_sz[1], TILE_SIZE*wm_tiles_sz[0], 3), dtype=torch.uint8)
 
-            for tile_xy in torch.cartesian_prod(
-                    torch.arange(wm_tiles_tl[0], wm_tiles_br[0]),
-                    torch.arange(wm_tiles_tl[1], wm_tiles_br[1])).to(d):
-                pad = 8 # NOTE: Testing pad
-                _,timg = self.do_one_tile(img, cam_f, cam_c, eye, R, tile_xy, pad=pad)
-                ly = wm_tiles_sz[1] - 1 - (tile_xy[1] - wm_tiles_tl[1])
-                # ly = tile_xy[1] - wm_tiles_tl[1]
-                lx = tile_xy[0] - wm_tiles_tl[0]
-                h,w = TILE_SIZE,TILE_SIZE
-                dimg[ly*h:(ly+1)*h, lx*w:(lx+1)*w] = timg[pad:-pad,pad:-pad].byte()
-        else:
-            dimg = self.do_several_tiles(img, cam_f, cam_c, eye, R, wm_tiles_tl, wm_tiles_br).byte()
+                for tile_xy in torch.cartesian_prod(
+                        torch.arange(wm_tiles_tl[0], wm_tiles_br[0]),
+                        torch.arange(wm_tiles_tl[1], wm_tiles_br[1])).to(d):
+                    pad = 8 # NOTE: Testing pad
+                    # pad = 0 # NOTE: Testing pad
+                    _,timg = self.do_one_tile(img, cam_f, cam_c, eye, R, tile_xy, pad=pad)
+                    ly = wm_tiles_sz[1] - 1 - (tile_xy[1] - wm_tiles_tl[1])
+                    # ly = tile_xy[1] - wm_tiles_tl[1]
+                    lx = tile_xy[0] - wm_tiles_tl[0]
+                    h,w = TILE_SIZE,TILE_SIZE
+                    if pad > 0:
+                        timg = timg[pad:-pad,pad:-pad]
+                    dimg[ly*h:(ly+1)*h, lx*w:(lx+1)*w] = timg.byte()
+            else:
+                dimg = self.do_several_tiles(img, cam_f, cam_c, eye, R, wm_tiles_tl, wm_tiles_br).byte()
 
 
-        if dimg.shape[-1] != 3 or dimg.ndimension() == 2:
-            dimg = dimg.view(dimg.size(0),dimg.size(1),1).repeat(1,1,3)
-        green = torch.FloatTensor([0,80,0]).view(1,3).to(dimg.device)
-        for y in range(0, dimg.shape[0], TILE_SIZE):
-            dimg[y-2] = dimg[y-2] // 3 * 2 + green
-            dimg[y+2] = dimg[y+2] // 3 * 2 + green
-        for x in range(0, dimg.shape[1], TILE_SIZE):
-            dimg[:,x-2] = dimg[:,x-2] // 3 * 2 + green
-            dimg[:,x+2] = dimg[:,x+2] // 3 * 2 + green
+            if dimg.shape[-1] != 3 or dimg.ndimension() == 2:
+                dimg = dimg.view(dimg.size(0),dimg.size(1),1).repeat(1,1,3)
+            green = torch.FloatTensor([0,80,0]).view(1,3).to(dimg.device)
+            for y in range(0, dimg.shape[0], TILE_SIZE):
+                dimg[y-2] = dimg[y-2] // 3 * 2 + green
+                dimg[y+2] = dimg[y+2] // 3 * 2 + green
+            for x in range(0, dimg.shape[1], TILE_SIZE):
+                dimg[:,x-2] = dimg[:,x-2] // 3 * 2 + green
+                dimg[:,x+2] = dimg[:,x+2] // 3 * 2 + green
 
-        import cv2
-        cv2.imshow('tiled', dimg.clamp(0,255).cpu().numpy())
-        cv2.waitKey(100)
-        # exit()
+            import cv2
+            cv2.imshow('tiled', dimg.clamp(0,255).cpu().numpy())
+            cv2.waitKey(100)
+            # exit()
 
     '''
     Return tuple:
@@ -143,6 +147,8 @@ class OrthoRectifier:
 
     NOTE: `oimg` is a float32 tensor with zeros where no pixels matched and valid black pixels mapped to `1e-5`
           This can be used for further masking-of-valid pixels without a seperate mask tensor.
+
+    WARNING: I probably should NOT flip the Y axes here, but I do...
 
     '''
     def do_one_tile(self, img, cam_f, cam_c, eye, R, tile_xy, pad=0):
@@ -175,16 +181,19 @@ class OrthoRectifier:
 
         # Hard set any pixels outside of the acceptable border mask to 0.0 rather than 1e-5.
         # This marks that they are invalid (we don't want to bilinear sample invalid/black and valid pixels)
-        gg = g * img_sz
+        gg = (g*.5+.5) * img_sz
         border_pad = 3
-        border_mask = (gg[0,...,0]>img_sz[0]-border_pad) | \
-                      (gg[0,...,0]<border_pad) | \
-                      (gg[0,...,1]>img_sz[1]-border_pad) | \
-                      (gg[0,...,1]<border_pad)
-        # print('BORDER_MASK % keep',(border_mask).float().mean())
-        oimg[border_mask] = 0
+        if border_pad > 0:
+            border_mask = (gg[0,...,0]>img_sz[0]-border_pad) | \
+                        (gg[0,...,0]<border_pad) | \
+                        (gg[0,...,1]>img_sz[1]-border_pad) | \
+                        (gg[0,...,1]<border_pad)
+            # print('BORDER_MASK % keep',(border_mask).float().mean())
+            # oimg[border_mask] //= 2
+            oimg[border_mask] = 0
 
         oimg = oimg.flip(0)
+        g = g.flip(0)
         return g,oimg
 
     def do_several_tiles(self, img, cam_f, cam_c, eye, R, wm_tiles_tl, wm_tiles_br):

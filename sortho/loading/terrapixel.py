@@ -81,7 +81,7 @@ class TerraPixelLoader(BaseLoader):
                     pp = PoseEcef(posEcef, pq_enu)
                     pos_sigma = np.full((8,), 3)
                     pos_sigma = self.lastAsd.PosSigma()
-                    print('pos_sigma', pos_sigma)
+                    # print('pos_sigma', pos_sigma)
                     pp_sigmas = np.concatenate((pos_sigma, np.full((3,),.001)))
 
                     return FrameWithPosePrior(frame, pp, pp_sigmas)

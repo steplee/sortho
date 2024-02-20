@@ -9,8 +9,7 @@ def make_gauss(k, sigma):
     g = (g*g).sum(-1)
     g = (-g).exp()
     g = g / g.sum()
-    print(' - Gaussian Kernel:')
-    print(g, g.sum())
+    print(f' - Gaussian Kernel (size {k}x{k}), (max/min {g.max()/g.min()}) (min {g.min()}) (sum {g.sum()})')
     return g.view(1,1,k,k)
 
 def make_upsample_kernel(k):

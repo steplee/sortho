@@ -57,7 +57,7 @@ class DtedRayMarcher:
 
     Return ECEF points for each input `uv`.
     '''
-    def march(self, eye, R_ltp_from_body, uvs):
+    def march(self, eye, R_ltp_from_body, uvs, dbgPrint=False):
         d = self.device
         R_ltp_from_body = R_ltp_from_body.to(self.DT)
         uvs = uvs.to(self.DT)
@@ -78,7 +78,7 @@ class DtedRayMarcher:
 
             # FIXME: Must I use this?
             scale_factor = 1./np.cos(np.deg2rad(eye_wgs[0,1].cpu()))
-            print('scale_factor',scale_factor, 'eye altitude is', eye_wgs[0,2])
+            if dbgPrint: print('scale_factor',scale_factor, 'eye altitude is', eye_wgs[0,2])
 
             # Make first sample as the elev under `eye`. Replicate.
             _, _, initial_elev = self.sample_dted(eye[None])
@@ -88,7 +88,7 @@ class DtedRayMarcher:
             depths = eye_wgs[0,2] - initial_elev
             # print(eye[None].shape, rays.shape, depths.shape)
             rpts = ray_march(eye[None], rays, depths * self.alpha)
-            print('initial rpts moved:', (rpts-eye).norm(dim=1))
+            # print('initial rpts moved:', (rpts-eye).norm(dim=1))
 
             for i in range(self.iters):
                 rpts_wm, elevs = self.sample_dted_and_sample_points(rpts)
@@ -102,11 +102,11 @@ class DtedRayMarcher:
                 dd = dd * ((depths>0).to(self.DT) * 2 - 1) # Print negative numbers if the point is _under_ the terrain
                 # print('                 relative elev', rpts_wgs[:,2], elevs)
                 # print('                 depths', depths)
-                print(f'                step[{i:>2d}] rpts moved:', dd)
+                if dbgPrint: print(f'                step[{i:>2d}] rpts moved:', dd)
                 rpts = rpts1
 
                 if (abs(dd) < self.tol).all():
-                    print(f' - early stop, all changes smaller then self.tol ({self.tol})')
+                    if dbgPrint: print(f' - early stop, all changes smaller then self.tol ({self.tol})')
                     break
 
         return rpts
