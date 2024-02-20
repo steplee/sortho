@@ -35,6 +35,7 @@ Estimating frame extent:
 
 # NOTE: Mind the flip()s
 
+
 def get_projection_matrix(cam_f, cam_c, eye, R, device):
     K = torch.FloatTensor((
         cam_f[0], 0, cam_c[0],
@@ -53,10 +54,26 @@ def get_projection_matrix_parts(cam_f, cam_c, eye, R, device):
 class OrthoRectifier:
     def __init__(self, wmPixelLevel, device, *a, **k):
         k.setdefault('tol', 5) # Set relatively high tolerance. Ray marching needn't be very accurate.
-        self.dtedRayMarcher = DtedRayMarcher(*a, **k, device=device)
+        self.dtedRayMarcher = DtedRayMarcher(*a, **k, device=torch.device('cpu'))
         self.dted = self.dtedRayMarcher.dted
         self.device = device
         self.wmPixelLevel = wmPixelLevel
+
+    def get_extent(self, cam_f, cam_c, eye, R_ltp_from_sensor):
+        d = self.dtedRayMarcher.device
+
+        eye, cam_f, cam_c, R_ltp_from_sensor = to_torch(eye, cam_f, cam_c, R_ltp_from_sensor)
+
+        # could go as low as 2x2, but it's possible an interior point of the image lies outside convex hull of corners.
+        partial_uvs = uv_grid(4,4, cam_c, cam_f, device=d).reshape(-1,2)
+        rpts_ecef = self.dtedRayMarcher.march(eye, R_ltp_from_sensor, partial_uvs)
+
+        rpts_wm = torch_ecef_to_wm(rpts_ecef)
+
+        wm_tiles = Earth.decimal2integral(rpts_wm, self.wmPixelLevel-PIXEL_TO_TILE_OFFSET, cast=False)[...,:2]
+        wm_tiles_tl = wm_tiles.min(0).values.floor().long()
+        wm_tiles_br = wm_tiles.max(0).values.ceil().long()
+        return torch.cat((wm_tiles_tl, wm_tiles_br))
 
     def orthorectify_tiles(self, img, cam_f, cam_c, eye, R_ltp_from_sensor):
         d = self.device
@@ -67,18 +84,14 @@ class OrthoRectifier:
         cam_c = torch.from_numpy(cam_c)
         img = torch.from_numpy(img)
         H,W = img.shape[:2]
-        # could go as low as 2x2, but it's possible an interior point of the image lies outside convex hull of corners.
-        partial_uvs = uv_grid(4,4, cam_c, cam_f, device=d).reshape(-1,2)
-        rpts_ecef = self.dtedRayMarcher.march(eye, R_ltp_from_sensor, partial_uvs)
 
         Ltp = get_ltp(eye[None])[0]
         R = Ltp @ R_ltp_from_sensor
 
-        rpts_wm = torch_ecef_to_wm(rpts_ecef)
+        # wm_tiles = Earth.decimal2integral(rpts_wm, self.wmPixelLevel-PIXEL_TO_TILE_OFFSET, cast=False)[...,:2]
+        wm_tiles_tlbr = self.get_extent(cam_f, cam_c, eye, R_ltp_from_sensor).cpu()
+        wm_tiles_tl, wm_tiles_br = wm_tiles_tlbr[:2], wm_tiles_tlbr[2:]
 
-        wm_tiles = Earth.decimal2integral(rpts_wm, self.wmPixelLevel-PIXEL_TO_TILE_OFFSET, cast=False)[...,:2]
-        wm_tiles_tl = wm_tiles.min(0).values.floor().long()
-        wm_tiles_br = wm_tiles.max(0).values.ceil().long()
         wm_tiles_sz = (wm_tiles_br - wm_tiles_tl)
         wm_tiles_n = wm_tiles_sz[0]*wm_tiles_sz[1]
 
@@ -88,7 +101,8 @@ class OrthoRectifier:
         assert wm_tiles_n < 200, 'too many tiles'
 
         #
-        # I wrote the do_one_tile version first -- no reason not to do all at once though.
+        # `do_one_tile` supports padding (which will be useful for blending while individual tiles)
+        # Unless trying to process individual tiles, `do_several_tiles` is faster and should be used
         #
         if 0:
             dimg = torch.zeros((TILE_SIZE*wm_tiles_sz[1], TILE_SIZE*wm_tiles_sz[0], 3), dtype=torch.uint8)
@@ -96,14 +110,15 @@ class OrthoRectifier:
             for tile_xy in torch.cartesian_prod(
                     torch.arange(wm_tiles_tl[0], wm_tiles_br[0]),
                     torch.arange(wm_tiles_tl[1], wm_tiles_br[1])).to(d):
-                timg = self.do_one_tile(img, cam_f, cam_c, eye, R, tile_xy)
+                pad = 8 # NOTE: Testing pad
+                _,timg = self.do_one_tile(img, cam_f, cam_c, eye, R, tile_xy, pad=pad)
                 ly = wm_tiles_sz[1] - 1 - (tile_xy[1] - wm_tiles_tl[1])
                 # ly = tile_xy[1] - wm_tiles_tl[1]
                 lx = tile_xy[0] - wm_tiles_tl[0]
-                h,w = timg.shape[:2]
-                dimg[ly*h:(ly+1)*h, lx*w:(lx+1)*w] = timg
+                h,w = TILE_SIZE,TILE_SIZE
+                dimg[ly*h:(ly+1)*h, lx*w:(lx+1)*w] = timg[pad:-pad,pad:-pad].byte()
         else:
-            dimg = self.do_several_tiles(img, cam_f, cam_c, eye, R, wm_tiles_tl, wm_tiles_br)
+            dimg = self.do_several_tiles(img, cam_f, cam_c, eye, R, wm_tiles_tl, wm_tiles_br).byte()
 
 
         if dimg.shape[-1] != 3 or dimg.ndimension() == 2:
@@ -121,12 +136,23 @@ class OrthoRectifier:
         cv2.waitKey(100)
         # exit()
 
-    def do_one_tile(self, img, cam_f, cam_c, eye, R, tile_xy):
+    '''
+    Return tuple:
+        `g`:    source pixel coordinates (normalized [-1,1])
+        `oimg`: warped/rectified tile
+
+    NOTE: `oimg` is a float32 tensor with zeros where no pixels matched and valid black pixels mapped to `1e-5`
+          This can be used for further masking-of-valid pixels without a seperate mask tensor.
+
+    '''
+    def do_one_tile(self, img, cam_f, cam_c, eye, R, tile_xy, pad=0):
         d = self.device
-        tile_tl = Earth.integral2decimal(tile_xy, self.wmPixelLevel-PIXEL_TO_TILE_OFFSET)
-        tile_br = Earth.integral2decimal(tile_xy+1, self.wmPixelLevel-PIXEL_TO_TILE_OFFSET)
-        grid_wm = ((grid(TILE_SIZE,TILE_SIZE,device=d) + 1) * .5 * (tile_br - tile_tl) + tile_tl).view(-1,2)
-        grid_wm_elev = torch.from_numpy(self.dted.rasterIo(torch.cat((tile_tl,tile_br)).cpu().numpy(), TILE_SIZE, TILE_SIZE, 1).astype(np.float32)).to(d)
+        pix_xy = tile_xy * TILE_SIZE
+        pix_tl = Earth.integral2decimal(pix_xy-pad, self.wmPixelLevel)
+        pix_br = Earth.integral2decimal(pix_xy+TILE_SIZE+pad, self.wmPixelLevel)
+        size = TILE_SIZE + 2*pad
+        grid_wm = ((grid(size,size,device=d) + 1) * .5 * (pix_br - pix_tl) + pix_tl).view(-1,2)
+        grid_wm_elev = torch.from_numpy(self.dted.rasterIo(torch.cat((pix_tl,pix_br)).cpu().numpy(), size, size, 1).astype(np.float32)).to(d)
         grid_wm_elev = grid_wm_elev.flip(0)
         grid_wm_elev = grid_wm_elev.view(-1,1) / 8
         grid_wm = torch.cat((grid_wm, grid_wm_elev), -1)
@@ -142,20 +168,32 @@ class OrthoRectifier:
 
         img_sz = torch.FloatTensor((img.shape[1], img.shape[0])).to(d)
         g = (proj_pts / img_sz) * 2 - 1
-        g = g.reshape(TILE_SIZE, TILE_SIZE, 2)[None]
+        g = g.reshape(size, size, 2)[None]
 
-        img = img.permute(2,0,1).to(d).float()[None] # BCHW
+        img = img.permute(2,0,1).to(d).float()[None].clamp(1e-5,999) # BCHW
         oimg = torch.nn.functional.grid_sample(img, g)[0].permute(1,2,0) # HWC
-        oimg = oimg.byte().flip(0)
-        return oimg
+
+        # Hard set any pixels outside of the acceptable border mask to 0.0 rather than 1e-5.
+        # This marks that they are invalid (we don't want to bilinear sample invalid/black and valid pixels)
+        gg = g * img_sz
+        border_pad = 3
+        border_mask = (gg[0,...,0]>img_sz[0]-border_pad) | \
+                      (gg[0,...,0]<border_pad) | \
+                      (gg[0,...,1]>img_sz[1]-border_pad) | \
+                      (gg[0,...,1]<border_pad)
+        # print('BORDER_MASK % keep',(border_mask).float().mean())
+        oimg[border_mask] = 0
+
+        oimg = oimg.flip(0)
+        return g,oimg
 
     def do_several_tiles(self, img, cam_f, cam_c, eye, R, wm_tiles_tl, wm_tiles_br):
         nx,ny = (wm_tiles_br - wm_tiles_tl).long().cpu().numpy()
         dimg = torch.zeros((TILE_SIZE*ny, TILE_SIZE*nx, 3), dtype=torch.uint8)
 
         d = self.device
-        tile_tl = Earth.integral2decimal(wm_tiles_tl, self.wmPixelLevel-PIXEL_TO_TILE_OFFSET)
-        tile_br = Earth.integral2decimal(wm_tiles_br, self.wmPixelLevel-PIXEL_TO_TILE_OFFSET)
+        tile_tl = Earth.integral2decimal(wm_tiles_tl, self.wmPixelLevel-PIXEL_TO_TILE_OFFSET).to(d)
+        tile_br = Earth.integral2decimal(wm_tiles_br, self.wmPixelLevel-PIXEL_TO_TILE_OFFSET).to(d)
         grid_wm = ((grid(TILE_SIZE*ny,TILE_SIZE*nx,device=d) + 1) * .5 * (tile_br - tile_tl) + tile_tl).view(-1,2)
         grid_wm_elev = torch.from_numpy(self.dted.rasterIo(torch.cat((tile_tl,tile_br)).cpu().numpy(), TILE_SIZE*nx, TILE_SIZE*ny, 1).astype(np.float32)).to(d)
         grid_wm_elev = grid_wm_elev.flip(0)
@@ -175,9 +213,9 @@ class OrthoRectifier:
         g = (proj_pts / img_sz) * 2 - 1
         g = g.reshape(TILE_SIZE*ny, TILE_SIZE*nx, 2)[None]
 
-        img = img.permute(2,0,1).to(d).float()[None] # BCHW
+        img = img.permute(2,0,1).to(d).float()[None].clamp(1e-5,999) # BCHW
         oimg = torch.nn.functional.grid_sample(img, g)[0].permute(1,2,0) # HWC
-        oimg = oimg.byte().flip(0)
+        oimg = oimg.flip(0)
         return oimg
 
 

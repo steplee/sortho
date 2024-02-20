@@ -43,6 +43,7 @@ class DtedRayMarcher:
         eopts = EnvOptions()
         eopts.isTerrain = True
         eopts.cache = True
+        eopts.readonly = True
         self.dted = FlatReaderCached(dtedPath,eopts)
         self.alpha = alpha
         self.iters = iters

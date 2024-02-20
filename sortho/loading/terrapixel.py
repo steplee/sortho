@@ -29,12 +29,16 @@ if 0:
     exit()
 
 class TerraPixelLoader(BaseLoader):
-    def __init__(self, path, loadImages=True):
+    def __init__(self, path, frameStride=1, loadImages=True, maxFrames=0):
         super().__init__()
 
         self.reader = Reader(path, lazy=True)
         self.lastAsd = None
         self.loadImages = loadImages
+        self.frameStride = frameStride
+        self.maxFrames = maxFrames
+        self.nframesIn = 1
+        self.nframesOut = 1
 
     def __iter__(self):
         self.reader_iter = iter(self.reader)
@@ -43,6 +47,8 @@ class TerraPixelLoader(BaseLoader):
     def __next__(self):
         while True:
             Ty, buf, sz = next(self.reader_iter)
+
+            if self.maxFrames > 0 and self.nframesOut > self.maxFrames: raise StopIteration()
 
             if Ty == Asd:
                 asd = Ty()
@@ -57,24 +63,28 @@ class TerraPixelLoader(BaseLoader):
 
             if self.lastAsd is not None and Ty == JpegSourceFrame:
 
-                # Get frame
-                jsf = Ty()
-                jsf.Init(buf, sz)
-                img = cv2.imdecode(jsf.JpegDataAsNumpy(), cv2.IMREAD_COLOR) if self.loadImages else None
-                frame = Frame(jsf.Tstamp(), img, createIntrinFromCamModel(jsf.Cam()), decodeQuat(self.lastAsd.Sq))
+                self.nframesIn += 1
+                if self.nframesIn % self.frameStride == 0:
+                    self.nframesOut += 1
 
-                # Get posePrior
-                posWgs = self.lastAsd.PosAsNumpy()[None]
-                posEcef = transform_points_epsg(4326, 4978, posWgs)[0]
-                pq_rwf = decodeQuat(self.lastAsd.Pq)
-                pq_enu = q_enu_from_rwf(pq_rwf)
-                pp = PoseEcef(posEcef, pq_enu)
-                pos_sigma = np.full((8,), 3)
-                pos_sigma = self.lastAsd.PosSigma()
-                print('pos_sigma', pos_sigma)
-                pp_sigmas = np.concatenate((pos_sigma, np.full((3,),.001)))
+                    # Get frame
+                    jsf = Ty()
+                    jsf.Init(buf, sz)
+                    img = cv2.imdecode(jsf.JpegDataAsNumpy(), cv2.IMREAD_COLOR) if self.loadImages else None
+                    frame = Frame(jsf.Tstamp(), img, createIntrinFromCamModel(jsf.Cam()), decodeQuat(self.lastAsd.Sq))
 
-                return FrameWithPosePrior(frame, pp, pp_sigmas)
+                    # Get posePrior
+                    posWgs = self.lastAsd.PosAsNumpy()[None]
+                    posEcef = transform_points_epsg(4326, 4978, posWgs)[0]
+                    pq_rwf = decodeQuat(self.lastAsd.Pq)
+                    pq_enu = q_enu_from_rwf(pq_rwf)
+                    pp = PoseEcef(posEcef, pq_enu)
+                    pos_sigma = np.full((8,), 3)
+                    pos_sigma = self.lastAsd.PosSigma()
+                    print('pos_sigma', pos_sigma)
+                    pp_sigmas = np.concatenate((pos_sigma, np.full((3,),.001)))
+
+                    return FrameWithPosePrior(frame, pp, pp_sigmas)
 
 
 if __name__ == '__main__':

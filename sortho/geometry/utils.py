@@ -1,5 +1,11 @@
 import torch, numpy as np
 
+def to_torch(*a):
+    if len(a) == 1:
+        b=a[0]
+        return (torch.from_numpy(b) if isinstance(b,np.ndarray) else b)
+    return tuple(torch.from_numpy(b) if isinstance(b,np.ndarray) else b for b in a)
+
 def normalize_rows(x):
     assert x.ndim == 2
     return x / x.norm(dim=1,keepdim=True)

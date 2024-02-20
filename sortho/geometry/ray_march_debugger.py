@@ -13,6 +13,7 @@ class DtedRayMarcherDebugger(DtedRayMarcher):
         eopts = EnvOptions()
         eopts.isTerrain = False
         eopts.cache = True
+        eopts.readonly = True
         self.colorDset = FlatReaderCached(colorDsetPath,eopts)
 
     def marchAndShow(self, H=512, W=512, *a, **k):
