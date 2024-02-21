@@ -1,44 +1,105 @@
+import numpy as np, torch
 from gtsam import (Cal3_S2, DoglegOptimizer,
-                         GenericProjectionFactorCal3_S2, Marginals,
-                         NonlinearFactorGraph, PinholeCameraCal3_S2, Point3,
-                         Pose3, PriorFactorPoint3, PriorFactorPose3, Rot3, Values)
+                    GenericProjectionFactorCal3_S2, Marginals,
+                    NonlinearFactorGraph, PinholeCameraCal3_S2, Point3,
+                    ISAM2, 
+                    PriorFactorCal3_S2, noiseModel, GeneralSFMFactor2Cal3_S2,
+                    LevenbergMarquardtParams, LevenbergMarquardtOptimizer,
+                    Pose3, PriorFactorPoint3, PriorFactorPose3, Rot3, Values)
 
+from gtsam import symbol_shorthand
+L = symbol_shorthand.L
+X = symbol_shorthand.X
+B = symbol_shorthand.B
+K = symbol_shorthand.K
 
 from sortho.matching.loftr import LoftrMatcher
+from sortho.utils.etc import get_ltp, rodrigues, to_torch
+from sortho.geometry.ray_march_dted import DtedRayMarcher
 
 # def show_matches(imgsa, imgsb, ptsa, ptsb, sigmas): pass
 
+def make_gtsam_pose(pose, sq=None, makeEcef=True, origin=None):
+    from sortho.utils.q import q_to_matrix
+    R = q_to_matrix(pose.pq)
+    if makeEcef:
+        Ltp = get_ltp(pose.pos[None])[0]
+        R = Ltp @ R
+
+    if sq is not None:
+        R = R @ q_to_matrix(sq)
+
+    p = (pose.pos-origin) if origin is not None else pose.pos
+
+    rot = Rot3(R)
+    return Pose3(rot, p)
+
+# Quantize XY keypoints and aggregate them with consistent IDs amongst multiple frames
+# FIXME: Record dict of observations and _SEPERATE_ dict of keypoint locations, prevents need for quantization.
+def aggregrate_keypoints(matchesIJ):
+
+    # For each frame, store a dict of quantized XY keypoint to list of 
+    frameKptss = {}
+
+    for i, matchesJ in matchesIJ.items():
+        for j, matches in matchesJ.items():
+            ptsi, ptsj, conf = matches
+            if isinstance(ptsi, torch.Tensor): ptsi = ptsi.cpu().numpy()
+            if isinstance(ptsj, torch.Tensor): ptsj = ptsj.cpu().numpy()
+            if isinstance(conf, torch.Tensor): conf = conf.cpu().numpy()
+            ptsi = ptsi.astype(int).tolist()
+            ptsj = ptsj.astype(int).tolist()
+
+            if i not in frameKptss: frameKptss[i] = {}
+            if j not in frameKptss: frameKptss[j] = {}
+            frameKptsI = frameKptss[i]
+            frameKptsJ = frameKptss[j]
+            for I in range(len(ptsi)):
+                pti, ptj, cnf = tuple(ptsi[I]), tuple(ptsj[I]), conf[I]
+                if pti not in frameKptsI: frameKptsI[pti] = [(j, ptj, cnf)]
+                else:                     frameKptsI[pti].append((j, ptj, cnf))
+                if ptj not in frameKptsJ: frameKptsJ[ptj] = [(i, pti, cnf)]
+                else:                     frameKptsJ[ptj].append((i, pti, cnf))
+
+    return frameKptss
+
+
+
 class Solver:
-    def __init__(self):
-        self.matcher = LoftrMatcher()
+    def __init__(self, conf):
+        self.conf = conf
+        self.matcher = LoftrMatcher(**conf.matcher)
+        self.dtedRayMarcher = DtedRayMarcher(**conf.dtedRayMarcher)
 
 
     # NOTE: This may be called multiple times. This is preferred to calling it once and caching images, because
     #       that'd require potentially lots of RAM for storing decoded images.
     def get_loader(self, loadImages=True):
-        # TODO: fix obviously
+        inputPath = self.conf.input.path
+        frameStride = self.conf.input.get('frameStride', 1)
         from sortho.loading.terrapixel import TerraPixelLoader
-        tpl = TerraPixelLoader('/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', loadImages=loadImages, maxFrames=20, frameStride=8)
+        tpl = TerraPixelLoader(inputPath, frameStride=frameStride, loadImages=loadImages, maxFrames=self.conf.input.maxFrames)
         return tpl
 
     def get_matches(self):
         hist = [] # Store recent fwpp in a deque
 
         # lookback = [1,2,4,8,16]
-        lookback = [1,2,3,5,8]
+        # lookback = [1,2,3,5,8]
+        lookback = [1,2,3,5]
 
         # Oriented backwards (i -> j)
-        allMatches = {}
+        allMatchesIJ = {}
         allFramesNoImages = {}
 
         tpl = self.get_loader(loadImages=True)
         for i,fwpp in enumerate(tpl):
-            allMatches[i] = {}
+            allMatchesIJ[i] = {}
 
             for bi in lookback:
 
                 if len(hist)-bi >= 0:
-                    print('COMPARE', len(allMatches)-1, len(allMatches)-bi-1)
+                    print('COMPARE', len(allMatchesIJ)-1, len(allMatchesIJ)-bi-1)
                     matches = self.try_match(fwpp, hist[-bi])
                     if matches is None:
                         pass
@@ -46,16 +107,36 @@ class Solver:
                         ptsa,ptsb,sigma = matches
 
                         j = i - bi
-                        allMatches[i][j] = ptsa,ptsb,sigma
+                        allMatchesIJ[i][j] = ptsa,ptsb,sigma
 
             hist.append(fwpp)
             if len(hist) > lookback[-1]: hist = hist[-lookback[-1]:]
             allFramesNoImages[i] = fwpp.dropImage()
 
-        return allMatches, allFramesNoImages
+        return allMatchesIJ, allFramesNoImages
 
     def run(self):
-        matches, frames = self.get_matches()
+        matchesIJ, frames = self.get_matches()
+
+        '''
+        # Copy and transpose map
+        matchesJI = {}
+        for i,matchesJ in matchesIJ.items():
+            for j,matches in matchesJ.items():
+                if j not in matchesJI: matchesJI[j] = {}
+                matchesJI[j][i] = matches
+
+        self.run_nlls(matchesIJ, matchesJI, frames)
+        '''
+
+        frameKptss = aggregrate_keypoints(matchesIJ)
+        self.run_nlls(frameKptss, frames)
+
+    #
+    # NOTE: I am _NOT_ using ISAM2 here, but just a NLLS BA setup
+    #
+    # def run_nlls(self, matchesIJ, matchesJI, frames):
+    def run_nlls(self, frameKptss, frames):
 
         #
         # Create a pose state for each frame
@@ -69,14 +150,202 @@ class Solver:
         #       But that may require custom factors (can this be done in python?)
         #       So at first, maybe just apply elevation constraint according to initial/prior projected position.
         #
+        # NOTE: I cannot find out how to create a node from the transformation of two others. This is unbelievable!
+        #       It looks like the C++ `ReferenceFrameFactor` is needed, but not available in python.
+        #       That means I cannot have a shared bias pose that all others are transformed by.
+        #       That means I also have to apply the sensor_quaternion to the main pose itself (rather than splitting into two)
+        #
 
-        for k,v in matches.items():
+        print(' - Building Factor Graph')
+        Kdict = {}
+
+        initial = Values()
+        graph = NonlinearFactorGraph()
+
+        pose2frameKey = {}
+        frameKeyAndPixelToLandmarkId = {}
+        landmarkIdToFrameKeyAndPixel = {}
+
+        # TODO: Lower the Z sigma on the last few iters
+        landmark_prior_noise = noiseModel.Isotropic.Sigmas(np.array((5000,5000, 10.)))
+
+        posePriorFactors = []
+        landmarkPriorFactors = []
+        projFactors = []
+
+        origin = list(frames.values())[0].posePrior.pos
+
+        # for k in matchesIJ.keys():
+        for k in frameKptss.keys():
             fwpp = frames[k]
-            K = Cal3_S2(*fwpp.frame.intrin.f, 0, *fwpp.frame.intrin.c)
+
+            # Get or create camera model node
+            # NOTE: Should use PinholeCamera node, but I'll handle pose+camera myself to learn.
+            if 1:
+                fx,fy = fwpp.frame.intrin.f.astype(int)
+                fkey = fx*10_000 + fy
+                Knew = False
+                if fkey not in Kdict: Kdict[fkey], Knew = (len(Kdict),Cal3_S2(*fwpp.frame.intrin.f, 0, *fwpp.frame.intrin.c)), True
+                Kid, KK = Kdict[fkey]
+
+                # If created new camera model, add prior on it.
+                if Knew:
+                    cam_prior_noise = np.array((30,30, 1e-5, 10,10.))
+                    graph.add(PriorFactorCal3_S2(K(Kid), KK, noiseModel.Isotropic.Sigmas(cam_prior_noise)))
+                    initial.insert(K(Kid), KK)
+
+            # Create pose prior
+            if 1:
+                pp = fwpp.posePrior
+                pp_sigmas = fwpp.posePriorSigmas
+                Xid = len(pose2frameKey)
+                pose2frameKey[Xid] = k
+                XX = make_gtsam_pose(pp, makeEcef=True, sq=fwpp.frame.sq, origin=origin)
+                posePriorFactors.append(PriorFactorPose3(X(Xid), XX, noiseModel.Isotropic.Sigmas(pp_sigmas)))
+                graph.add(posePriorFactors[-1])
+                initial.insert(X(Xid), XX)
+
+            # FIXME: Graph is wrong, leads to zero projection errors. logical error must fix.
+
+            # Create landmark observation factors. If any landmarks are unseen add and add initialize them. Add elevation constraint on vertical axis.
+            if 1:
+                # Combine forward and backward looking matches
+                # matches = [list(matchesIJ.items()) + list(matchesJI.items())]
+                frameKpts = frameKptss[k]
+                landmarkPts0 = self.intersect_terrain(XX, KK, np.array(list(frameKpts.keys())), origin)
+                # camera = PinholeCameraCal3_S2(X(Xid), K)
+
+                for ii, (ipt, (jpts)) in enumerate(frameKpts.items()):
+
+                    if (k,ipt) not in frameKeyAndPixelToLandmarkId:
+                        Lid = len(frameKeyAndPixelToLandmarkId)
+                        frameKeyAndPixelToLandmarkId[(k,ipt)] = Lid
+                        landmarkIdToFrameKeyAndPixel[Lid] = (k,ipt)
+                        LL = Point3(landmarkPts0[ii])
+                        landmarkPriorFactors.append(PriorFactorPoint3(L(Lid), LL, landmark_prior_noise))
+                        graph.add(landmarkPriorFactors[-1])
+                        initial.insert(L(Lid), LL)
+                    else:
+                        Lid = frameKeyAndPixelToLandmarkId[(k,ipt)]
+
+                    # noise = noiseModel.Isotropic.Sigma(2,10) # FIXME: use sigma
+                    # noise = noiseModel.Isotropic.Sigma(2,.00001) # FIXME: use sigma
+                    # noise = noiseModel.Isotropic.Sigma(2,4) # FIXME: use sigma
+                    noise = noiseModel.Robust.Create(
+                        noiseModel.mEstimator.Huber.Create(12),
+                        noiseModel.Isotropic.Sigma(2,4))
+
+
+                    # graph.add(GenericProjectionFactorCal3_S2(ipt, noise, X(i), L(Lid), Kid))
+                    # ipt = (ipt[0]+90, ipt[1])
+                    projFactors.append(GeneralSFMFactor2Cal3_S2(ipt, noise, X(Xid), L(Lid), K(Kid)))
+                    graph.add(projFactors[-1])
+
+
+        # NOTE: Because the landmark terrain elevation constraints change according to current state,
+        #       We should not run for many iterations. We have to keep updating the constraints as the state values change.
+        # params = LevenbergMarquardtParams()
+        print(' - Creating Optimizer')
+        # params = LevenbergMarquardtParams.CeresDefaults()
+        params = LevenbergMarquardtParams()
+        params.setMaxIterations(100)
+        params.setVerbosityLM('DAMPED')
+        optimizer = LevenbergMarquardtOptimizer(graph, initial, params)
+        print(' - Optimizing')
+        final = optimizer.optimize()
+
+        # FIXME: Do this multiple times -- updating the terrain elevation constraint each time!
+
+        def sumErr(factors, values):
+            mse = 0
+            for factor in factors: mse += factor.error(values)
+            return np.sqrt(mse/len(factors))
+        def printErrs(values):
+            print(f'\t- total        : {graph.error(values):7.9f}')
+            print(f'\t- posePrior    : {sumErr(posePriorFactors, values):7.9f}')
+            print(f'\t- landmarkPrior: {sumErr(landmarkPriorFactors, values):7.9f}')
+            print(f'\t- projection   : {sumErr(projFactors, values):7.9f}')
+        print(' - Initial Errors')
+        printErrs(initial)
+        print(' - Final Errors')
+        printErrs(final)
+
+        ediff, ldiff = 0, 0
+        for Xid in pose2frameKey.keys():
+            a = initial.atPose3(X(Xid)).translation()
+            b = final  .atPose3(X(Xid)).translation()
+            ediff += np.linalg.norm(a-b)
+        for Lid in landmarkIdToFrameKeyAndPixel.keys():
+            a = initial.atPoint3(L(Lid))
+            b = final  .atPoint3(L(Lid))
+            ldiff += np.linalg.norm(a-b)
+        print(f' - Differences')
+        print(f'\t- landmarks: {ldiff/len(landmarkIdToFrameKeyAndPixel):7.9f}')
+        print(f'\t- poseEyes : {ediff/len(landmarkIdToFrameKeyAndPixel):7.9f}')
+
+        self.make_gtsam_viz('initial', origin, [initial,final], frames, pose2frameKey, landmarkIdToFrameKeyAndPixel)
+
+    def make_gtsam_viz(self, name, origin, valuess, frames, pose2frameKey, landmarkIdToFrameKeyAndPixel):
+        import matplotlib.pyplot as plt
+
+        # Get Ltp matrix
+        poss = []
+        for frame in frames.values():
+            poss.append(frame.posePrior.pos)
+        pos0 = np.stack(poss,0).mean(0)
+        Ltp = get_ltp(pos0[None])[0]
+
+        for label, values in zip(('initial', 'final'), (valuess[0], valuess[-1])):
+
+            # Get all optical centers
+            octrs = []
+            for Xid in pose2frameKey.keys():
+                XX = values.atPose3(X(Xid))
+                p = XX.translation() + origin
+                print(label,Xid,XX.translation(), p)
+                p_local = Ltp.T @ p
+                octrs.append(p_local)
+            octrs = np.stack(octrs,0)
+
+            # Get all landmark pts
+            lpts = []
+            for Lid in landmarkIdToFrameKeyAndPixel.keys():
+                LL = values.atPoint3(L(Lid)) + origin
+                p = LL
+                p_local = Ltp.T @ p
+                lpts.append(p_local)
+            lpts = np.stack(lpts,0)
+
+            plt.scatter(octrs[:,0], octrs[:,1], label=label+'_pose')
+            plt.scatter(lpts[:,0], lpts[:,1], label=label+'_lpt', s=.2)
+        plt.legend()
+        plt.show()
+
+
+
+
+
+    def intersect_terrain(self, gtsamPose, gtsamIntrin, pixPts, origin):
+        eye   = gtsamPose.translation() + origin
+        R     = gtsamPose.rotation().matrix()
+        cam_f = gtsamIntrin.vector()[0:2]
+        cam_c = gtsamIntrin.vector()[3:5]
+
+        print(pixPts)
+        fpts = (pixPts - cam_c) / cam_f
+
+        eye, R, fpts = to_torch(eye, R, fpts)
+
+        rpts = self.dtedRayMarcher.march(eye, R, fpts, R_is_ecef=True).cpu().numpy()
+        depths = np.linalg.norm(rpts - eye.cpu().numpy()[None], axis=1).mean()
+        print('avg depths', depths)
+        return rpts - origin
+
+
 
     # Try to match two frames.
     def try_match(self, fa,fb):
-        matches = self.matcher.match(fa.frame.img,fb.frame.img)
+        matches = self.matcher.match(fa.frame.img,fb.frame.img, debugShow=dict(wait=1))
         ptsa, ptsb, conf, sigma = matches['apts'], matches['bpts'], matches['conf'], matches['sigma']
         ptsa, ptsb, conf, sigma = (t.cpu() for t in (ptsa,ptsb,conf,sigma))
         nvalid = (conf>.5).long().sum()
@@ -86,5 +355,13 @@ class Solver:
         return ptsa,ptsb,sigma
 
 if __name__ == '__main__':
-    s = Solver()
+    from omegaconf import OmegaConf
+    conf = OmegaConf.create({
+        'matcher': {},
+        'input': dict(path='/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', frameStride=8, maxFrames=6),
+        # 'input': dict(path='/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', frameStride=8, maxFrames=25),
+        'dtedRayMarcher': dict(dtedPath='/data/elevation/srtm/srtm.fft', iters=25),
+        # 'solver': dict(huber=True),
+    })
+    s = Solver(conf)
     s.run()

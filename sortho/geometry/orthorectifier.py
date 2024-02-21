@@ -1,6 +1,7 @@
 from .ray_march_dted import *
 from sortho.utils.geo import *
 from sortho.utils.torch_geo import torch_ecef_to_wm, torch_wm_to_ecef
+from sortho.utils.etc import to_torch
 
 PIXEL_TO_TILE_OFFSET = 8
 TILE_SIZE = (1<<PIXEL_TO_TILE_OFFSET)

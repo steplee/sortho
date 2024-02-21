@@ -3,6 +3,7 @@ from sortho.utils.geo import transform_points_epsg, Earth
 import torch, numpy as np
 
 from .utils import *
+from sortho.utils.etc import get_ltp, rodrigues
 
 # My torch impl from ECEF -> WM is over 4x faster even on the CPU (thanks to apparent libtorch multithreading the trig calls)
 # WARNING: I do get _slightly_ different results, of which I trust the libproj ones more.
@@ -57,9 +58,9 @@ class DtedRayMarcher:
 
     Return ECEF points for each input `uv`.
     '''
-    def march(self, eye, R_ltp_from_body, uvs, dbgPrint=False):
+    def march(self, eye, R0, uvs, dbgPrint=False, R_is_ecef=False):
         d = self.device
-        R_ltp_from_body = R_ltp_from_body.to(self.DT)
+        R0 = R0.to(self.DT)
         uvs = uvs.to(self.DT)
         eye = eye.to(self.DT)
 
@@ -67,9 +68,12 @@ class DtedRayMarcher:
             N,two = uvs.shape
             assert two == 2
 
-
             Ltp = get_ltp(eye[None])[0]
-            R = Ltp @ R_ltp_from_body # TODO: multiply by ltp to make R_ecef_from_body
+            if not R_is_ecef:
+                R = Ltp @ R0 # TODO: multiply by ltp to make R_ecef_from_body
+            else:
+                R = R0
+
             rays0 = normalize_rows(torch.cat((uvs, torch.ones_like(uvs[:,:1])), 1))
             eye, rays0, R = eye.to(d), rays0.to(d), R.to(d)
             rays = rays0 @ R.mT

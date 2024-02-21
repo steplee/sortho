@@ -1,10 +1,5 @@
 import torch, numpy as np
 
-def to_torch(*a):
-    if len(a) == 1:
-        b=a[0]
-        return (torch.from_numpy(b) if isinstance(b,np.ndarray) else b)
-    return tuple(torch.from_numpy(b) if isinstance(b,np.ndarray) else b for b in a)
 
 def normalize_rows(x):
     assert x.ndim == 2
@@ -27,22 +22,3 @@ def ray_march(origin, rays, depths):
     p = origin + rays * depths.view(-1,1)
     return p
 
-def get_ltp(p):
-    assert p.ndimension() == 2, 'This function takes rank-2 inputs and returns rank-3 outputs'
-    from torch.nn.functional import normalize
-    up = torch.FloatTensor([0,0,1]).view(1,3).to(p.dtype).to(p.device)
-    f = normalize(p)
-    # r = normalize(torch.cross(f,up))
-    r = normalize(torch.cross(up,f))
-    u = normalize(torch.cross(f,r))
-    R = torch.stack((r,u,f),2)
-    return R
-
-def rodrigues(r):
-    n = r.norm()
-    x,y,z = r / n
-    K = torch.FloatTensor((
-        0, -z, y,
-        z, 0, -x,
-        -y, x, 0)).view(3,3)
-    return torch.eye(3) + n.sin() * K + (1 - n.cos()) * (K@K)

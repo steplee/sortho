@@ -32,10 +32,10 @@ class Frame:
         return it
 
 class FrameWithPosePrior:
-    def __init__(self, frame, posePrior, posePrior_sigmas):
+    def __init__(self, frame, posePrior, posePriorSigmas):
         self.frame = frame
         self.posePrior = posePrior
-        self.posePrior_sigmas = posePrior_sigmas
+        self.posePriorSigmas = posePriorSigmas
 
     def dropImage(self):
         it = deepcopy(self)

@@ -20,7 +20,7 @@ class LoftrMatcher:
         matcher = matcher.eval().cuda()
         self.matcher = matcher
 
-    def match(self, x,y, debugShow=False):
+    def match(self, x,y, debugShow=None):
         with torch.no_grad():
             # To support multiple batch items, have to use the 'ids' outputs
 
@@ -64,7 +64,7 @@ class LoftrMatcher:
                 kpts1 = mkpts1.cpu().numpy()
                 nconf = mconf.cpu().numpy()
 
-                if debugShow == 'anim':
+                if debugShow.get('anim',False):
                     dimg0 = np.copy(dimg,'C')
                     limg = np.copy(dimg0,'C')*0
                     for j,(p1,p2,score) in enumerate(zip(kpts0+np.array((pad,pad))[None], kpts1+np.array((2*pad+ww,pad))[None], nconf)):
@@ -82,7 +82,7 @@ class LoftrMatcher:
                         c = [int(c*255*score) for c in hsv(j/len(kpts0))[:3]]
                         cv2.line(dimg, toint(p1), toint(p2), c, 1)
                     cv2.imshow('matches', dimg)
-                    cv2.waitKey(0)
+                    cv2.waitKey(debugShow.get('wait',0))
 
             return dict(apts=mkpts0, bpts=mkpts1, conf=mconf, sigma=sigma)
 
