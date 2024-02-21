@@ -51,8 +51,11 @@ class Blender1:
 
 
     def run(self):
+        print(' - Get Frame TileRange Dict')
         ftd = self._get_frame_tilerange_dict()
+        print(' - Get InvList')
         tfd = self._get_invlist(ftd)
+        print(' - Naive Get All Image Dict')
         framed = self._naive_get_all_image_dict()
         print(' - |ftd|:', len(ftd))
         print(' - |tfd|:', len(tfd))
@@ -151,8 +154,9 @@ class Blender1:
         else: tileWriter = None
 
         # TODO: multiprocess.pool this
-        print('\n','*'*80,sep='')
-        print(' - Writing tiles')
+        print('\n',' ','*'*80,sep='')
+        print(' * Writing tiles *')
+        print(' ','*'*80,'\n',sep='')
         # from multiprocess import Pool
         from tqdm import tqdm
         for tileCoord, frameKeys in tqdm(tfd.items()):
@@ -221,6 +225,7 @@ if __name__ == '__main__':
             # blend=dict(kind='simple'),
             # blend=dict(kind='lap', k=15, sigma=4.5, nlvl=5),
             ))]
+        confs.append(OmegaConf.from_cli())
 
     else:
         if len(sys.argv) > 1 and '=' not in sys.argv[1]:

@@ -157,7 +157,11 @@ class OrthoRectifier:
         pix_tl = Earth.integral2decimal(pix_xy-pad, self.wmPixelLevel)
         pix_br = Earth.integral2decimal(pix_xy+TILE_SIZE+pad, self.wmPixelLevel)
         size = TILE_SIZE + 2*pad
-        grid_wm = ((grid(size,size,device=d) + 1) * .5 * (pix_br - pix_tl) + pix_tl).view(-1,2)
+
+        grid_11 = grid(size,size,device=d)
+        if 1: grid_11 = grid_11 * (size-2)/(size-1) # NOTE: This makes do_one_tile EXACTLY the same as do_several_tiles, which is wanted!
+        grid_wm = ((grid_11 + 1) * .5 * (pix_br - pix_tl) + pix_tl).view(-1,2)
+
         grid_wm_elev = torch.from_numpy(self.dted.rasterIo(torch.cat((pix_tl,pix_br)).cpu().numpy(), size, size, 1).astype(np.float32)).to(d)
         grid_wm_elev = grid_wm_elev.flip(0)
         grid_wm_elev = grid_wm_elev.view(-1,1) / 8
@@ -203,7 +207,13 @@ class OrthoRectifier:
         d = self.device
         tile_tl = Earth.integral2decimal(wm_tiles_tl, self.wmPixelLevel-PIXEL_TO_TILE_OFFSET).to(d)
         tile_br = Earth.integral2decimal(wm_tiles_br, self.wmPixelLevel-PIXEL_TO_TILE_OFFSET).to(d)
-        grid_wm = ((grid(TILE_SIZE*ny,TILE_SIZE*nx,device=d) + 1) * .5 * (tile_br - tile_tl) + tile_tl).view(-1,2)
+
+        size = torch.LongTensor((TILE_SIZE*nx,TILE_SIZE*ny)).to(device=d)
+        grid_11 = grid(size[1],size[0],device=d)
+        if 1: grid_11 = grid_11 * (size-2)/(size-1)
+        grid_wm = ((grid_11 + 1) * .5 * (tile_br - tile_tl) + tile_tl).view(-1,2)
+        # grid_wm = ((grid(TILE_SIZE*ny,TILE_SIZE*nx,device=d) + 1) * .5 * (tile_br - tile_tl) + tile_tl).view(-1,2)
+
         grid_wm_elev = torch.from_numpy(self.dted.rasterIo(torch.cat((tile_tl,tile_br)).cpu().numpy(), TILE_SIZE*nx, TILE_SIZE*ny, 1).astype(np.float32)).to(d)
         grid_wm_elev = grid_wm_elev.flip(0)
         grid_wm_elev = grid_wm_elev.view(-1,1) / 8

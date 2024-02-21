@@ -13,7 +13,7 @@ def get_transform_for_wm_tlbr(lvl, iwmTlbr):
     # scale = (br - tl) / (iwmTlbr[2:] - iwmTlbr[:2])
     # scale = (iwmTlbr[2:] - iwmTlbr[:2]) / (br - tl)
     # scale = (1/Earth.wmLevels[lvl],)*2
-    scale = (Earth.wmLevels[lvl],)*2
+    scale = (Earth.wmLevels[lvl]*2,)*2
     off = tl
     '''
     A = np.array((
@@ -41,11 +41,11 @@ class TiffTileWriter:
         self.dset = gdal.Open(path, gdal.GA_Update)
         opts = {
             'COMPRESS': 'JPEG',
-            'BLOCKXSIZE': '256',
-            'BLOCKYSIZE': '256',
+            'BLOCKXSIZE': str(TiffTileWriter.TILE_SIZE),
+            'BLOCKYSIZE': str(TiffTileWriter.TILE_SIZE),
             'TILED': 'YES',
             'BIGTIFF': 'YES',
-            'JPEG_QUALITy': '80',
+            'JPEG_QUALITY': '80',
         }
         driver = gdal.GetDriverByName("GTiff")
         self.dset = driver.Create(path, int(w), int(h), c, gdal.GDT_Byte, options=[k+':'+v for k,v in opts.items()])
