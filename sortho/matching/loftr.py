@@ -15,6 +15,7 @@ from src.loftr import LoFTR, default_cfg
 class LoftrMatcher:
     def __init__(self, weightsPath='/data/chromeDownloads/outdoor_ds.ckpt'):
         # default_cfg['match_coarse']['thr'] = .2
+        default_cfg['match_coarse']['thr'] = .5
         matcher = LoFTR(config=default_cfg)
         matcher.load_state_dict(torch.load(weightsPath)['state_dict'])
         matcher = matcher.eval().cuda()
@@ -46,7 +47,7 @@ class LoftrMatcher:
                 mkpts0 = d['mkpts0_c'].long() + RES//2
                 mkpts1 = d['mkpts1_c'].long() + RES//2
             mconf = d['mconf']
-            sigma = RES/4 + RES * .5 / mconf
+            sigma = RES/4 + RES * .5 / (mconf**3) # NOTE: fast falloff
 
             if debugShow is not None:
                 from matplotlib.cm import hsv

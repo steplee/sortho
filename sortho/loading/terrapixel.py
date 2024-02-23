@@ -79,10 +79,10 @@ class TerraPixelLoader(BaseLoader):
                     pq_rwf = decodeQuat(self.lastAsd.Pq)
                     pq_enu = q_enu_from_rwf(pq_rwf)
                     pp = PoseEcef(posEcef, pq_enu)
-                    pos_sigma = np.full((8,), 3)
+                    pos_sigma = np.full((70,), 3)
                     pos_sigma = self.lastAsd.PosSigma()
-                    # print('pos_sigma', pos_sigma)
-                    pp_sigmas = np.concatenate((pos_sigma, np.full((3,),.001)))
+                    ori_sigma = np.full((3,),.004)
+                    pp_sigmas = np.concatenate((ori_sigma, pos_sigma,))
 
                     return FrameWithPosePrior(frame, pp, pp_sigmas)
 

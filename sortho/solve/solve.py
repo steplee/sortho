@@ -36,7 +36,7 @@ def make_gtsam_pose(pose, sq=None, makeEcef=True, origin=None):
 
 # Quantize XY keypoints and aggregate them with consistent IDs amongst multiple frames
 # FIXME: Record dict of observations and _SEPERATE_ dict of keypoint locations, prevents need for quantization.
-def aggregrate_keypoints(matchesIJ):
+def aggregrate_keypoints_0(matchesIJ):
 
     # For each frame, store a dict of quantized XY keypoint to list of 
     frameKptss = {}
@@ -63,6 +63,74 @@ def aggregrate_keypoints(matchesIJ):
 
     return frameKptss
 
+#
+# TODO: as a work around to the multiple 'seenBy' observing keypoints in the same keyframe,
+#       maybe multiple the sigma by 2^num_observers_from_same_frame!
+# I don't see a great way to fix the issue. Maybe just disregard all such estimates too?
+#
+def aggregrate_keypoints(matchesIJ):
+    observations = {} # dict[frameKey => dict[quantizedPt => landmarkIdx]]
+    landmarks = []
+
+    for i, matchesJ in matchesIJ.items():
+        for j, matches in matchesJ.items():
+        # for j, matches in list(matchesJ.items())[::-1]:
+            ptsi, ptsj, sgma = matches
+            if isinstance(ptsi, torch.Tensor): ptsi = ptsi.cpu().numpy()
+            if isinstance(ptsj, torch.Tensor): ptsj = ptsj.cpu().numpy()
+            if isinstance(sgma, torch.Tensor): sgma = sgma.cpu().numpy()
+            ptsi = ptsi.astype(int).tolist()
+            ptsj = ptsj.astype(int).tolist()
+
+            if i not in observations: observations[i] = {}
+            if j not in observations: observations[j] = {}
+
+            for I in range(len(ptsi)):
+                kj = j, *ptsj[I]
+                ki = i, *ptsi[I]
+                assert j < i
+
+                if kj not in observations[j]:
+                    lid = len(landmarks) # lid = landmarkIdx
+                    # landmarks.append(dict(seenBy=[kj]))
+                    landmarks.append(dict(firstSeenBy=kj, seenBy=set([kj])))
+                    observations[j][kj] = lid, sgma[I]
+                else:
+                    lid, _ = observations[j][kj]
+
+                # WARNING: This is can be re-assigned multiple times -- `ki` can be repeated for multiple of the `matchesJ` loop.
+                #          This means that a landmark can have MULTIPLE observing keypoints in a SINGLE image, which is a little weird, but not an error?
+                observations[i][ki] = lid, sgma[I]
+                # landmarks[lid]['seenBy'].append(ki)
+                landmarks[lid]['seenBy'].add(ki)
+
+    # print('Observations:\n', observations)
+    # print('Landmarks:\n', landmarks)
+    # print('Landmarks[0:20]:\n', landmarks[0:20])
+
+    if 1:
+        n_seen = sum(len(l['seenBy']) for l in landmarks)
+        seen_set = set()
+        for l in landmarks:
+            for p in l['seenBy']:
+                seen_set.add(p)
+        n_seen_uniq = len(seen_set)
+        n_pts  = 0
+        for i, matchesJ in matchesIJ.items():
+            for j, matches in matchesJ.items():
+                n_pts += len(matches[0]) * 2
+        print(n_seen,n_seen_uniq,n_pts)
+        lsizes = [len(l['seenBy']) for l in landmarks]
+        print(' - Landmark SeenBy Histogram')
+        for i,bin in enumerate(np.histogram(lsizes, bins=max(lsizes), range=(0,max(lsizes)))[0]):
+            if i > 1:
+                print('   ',i,bin)
+
+    return observations, landmarks
+
+
+
+
 
 
 class Solver:
@@ -86,7 +154,8 @@ class Solver:
 
         # lookback = [1,2,4,8,16]
         # lookback = [1,2,3,5,8]
-        lookback = [1,2,3,5]
+        # lookback = [1,2,3,5]
+        lookback = [1,2]
 
         # Oriented backwards (i -> j)
         allMatchesIJ = {}
@@ -99,7 +168,7 @@ class Solver:
             for bi in lookback:
 
                 if len(hist)-bi >= 0:
-                    print('COMPARE', len(allMatchesIJ)-1, len(allMatchesIJ)-bi-1)
+                    # print('COMPARE', len(allMatchesIJ)-1, len(allMatchesIJ)-bi-1)
                     matches = self.try_match(fwpp, hist[-bi])
                     if matches is None:
                         pass
@@ -129,14 +198,16 @@ class Solver:
         self.run_nlls(matchesIJ, matchesJI, frames)
         '''
 
-        frameKptss = aggregrate_keypoints(matchesIJ)
-        self.run_nlls(frameKptss, frames)
+        frameObss, landmarks = aggregrate_keypoints(matchesIJ)
+        self.run_nlls(frameObss, landmarks, frames)
 
     #
     # NOTE: I am _NOT_ using ISAM2 here, but just a NLLS BA setup
     #
     # def run_nlls(self, matchesIJ, matchesJI, frames):
-    def run_nlls(self, frameKptss, frames):
+    def run_nlls(self, frameObss, landmarks, frames):
+
+        # framObs :: dict[frameKey => dict[quantizedPt => landmarkIdx]]
 
         #
         # Create a pose state for each frame
@@ -163,11 +234,12 @@ class Solver:
         graph = NonlinearFactorGraph()
 
         pose2frameKey = {}
-        frameKeyAndPixelToLandmarkId = {}
-        landmarkIdToFrameKeyAndPixel = {}
+        # frameKeyAndPixelToLandmarkId = {}
+        # landmarkIdToFrameKeyAndPixel = {}
 
         # TODO: Lower the Z sigma on the last few iters
-        landmark_prior_noise = noiseModel.Isotropic.Sigmas(np.array((5000,5000, 10.)))
+        # landmark_prior_noise = noiseModel.Isotropic.Sigmas(np.array((500,500, 10.)))
+        landmark_prior_noise = noiseModel.Isotropic.Sigmas(np.array((9500,9500, 10.)))
 
         posePriorFactors = []
         landmarkPriorFactors = []
@@ -176,7 +248,7 @@ class Solver:
         origin = list(frames.values())[0].posePrior.pos
 
         # for k in matchesIJ.keys():
-        for k in frameKptss.keys():
+        for k in frameObss.keys():
             fwpp = frames[k]
 
             # Get or create camera model node
@@ -198,6 +270,8 @@ class Solver:
             if 1:
                 pp = fwpp.posePrior
                 pp_sigmas = fwpp.posePriorSigmas
+                # pp_sigmas *= 10 # WARNING:
+                print('pp_sigma', pp_sigmas)
                 Xid = len(pose2frameKey)
                 pose2frameKey[Xid] = k
                 XX = make_gtsam_pose(pp, makeEcef=True, sq=fwpp.frame.sq, origin=origin)
@@ -211,34 +285,31 @@ class Solver:
             if 1:
                 # Combine forward and backward looking matches
                 # matches = [list(matchesIJ.items()) + list(matchesJI.items())]
-                frameKpts = frameKptss[k]
-                landmarkPts0 = self.intersect_terrain(XX, KK, np.array(list(frameKpts.keys())), origin)
+                frameObs = frameObss[k]
+                pts = np.array(list(frameObs.keys()))[:,1:] # IXY -> XY
+                landmarkPts0 = self.intersect_terrain(XX, KK, pts, origin)
                 # camera = PinholeCameraCal3_S2(X(Xid), K)
 
-                for ii, (ipt, (jpts)) in enumerate(frameKpts.items()):
+                # for ii, (ipt, (jpts)) in enumerate(frameObs.items()):
+                for ii, (ipt, (Lid, sigma)) in enumerate(frameObs.items()):
 
-                    if (k,ipt) not in frameKeyAndPixelToLandmarkId:
-                        Lid = len(frameKeyAndPixelToLandmarkId)
-                        frameKeyAndPixelToLandmarkId[(k,ipt)] = Lid
-                        landmarkIdToFrameKeyAndPixel[Lid] = (k,ipt)
+                    if landmarks[Lid]['firstSeenBy'] == ipt:
+                        # Not efficient.
                         LL = Point3(landmarkPts0[ii])
                         landmarkPriorFactors.append(PriorFactorPoint3(L(Lid), LL, landmark_prior_noise))
                         graph.add(landmarkPriorFactors[-1])
                         initial.insert(L(Lid), LL)
-                    else:
-                        Lid = frameKeyAndPixelToLandmarkId[(k,ipt)]
 
+                    # noise = noiseModel.Robust.Create(noiseModel.mEstimator.Huber.Create(20), noiseModel.Isotropic.Sigma(2,14))
+                    noise = noiseModel.Robust.Create(noiseModel.mEstimator.Huber.Create(15), noiseModel.Isotropic.Sigma(2,sigma))
+                    # print(sigma)
                     # noise = noiseModel.Isotropic.Sigma(2,10) # FIXME: use sigma
                     # noise = noiseModel.Isotropic.Sigma(2,.00001) # FIXME: use sigma
-                    # noise = noiseModel.Isotropic.Sigma(2,4) # FIXME: use sigma
-                    noise = noiseModel.Robust.Create(
-                        noiseModel.mEstimator.Huber.Create(12),
-                        noiseModel.Isotropic.Sigma(2,4))
-
+                    # noise = noiseModel.Isotropic.Sigma(2,14) # FIXME: use sigma
 
                     # graph.add(GenericProjectionFactorCal3_S2(ipt, noise, X(i), L(Lid), Kid))
                     # ipt = (ipt[0]+90, ipt[1])
-                    projFactors.append(GeneralSFMFactor2Cal3_S2(ipt, noise, X(Xid), L(Lid), K(Kid)))
+                    projFactors.append(GeneralSFMFactor2Cal3_S2(pts[ii], noise, X(Xid), L(Lid), K(Kid)))
                     graph.add(projFactors[-1])
 
 
@@ -261,13 +332,13 @@ class Solver:
             for factor in factors: mse += factor.error(values)
             return np.sqrt(mse/len(factors))
         def printErrs(values):
-            print(f'\t- total        : {graph.error(values):7.9f}')
+            print(f'\t- sum total    : {graph.error(values):7.9f}')
             print(f'\t- posePrior    : {sumErr(posePriorFactors, values):7.9f}')
             print(f'\t- landmarkPrior: {sumErr(landmarkPriorFactors, values):7.9f}')
             print(f'\t- projection   : {sumErr(projFactors, values):7.9f}')
-        print(' - Initial Errors')
+        print(' - Initial RMSEs')
         printErrs(initial)
-        print(' - Final Errors')
+        print(' - Final RMSEs')
         printErrs(final)
 
         ediff, ldiff = 0, 0
@@ -275,17 +346,17 @@ class Solver:
             a = initial.atPose3(X(Xid)).translation()
             b = final  .atPose3(X(Xid)).translation()
             ediff += np.linalg.norm(a-b)
-        for Lid in landmarkIdToFrameKeyAndPixel.keys():
+        for Lid in range(len(landmarks)):
             a = initial.atPoint3(L(Lid))
             b = final  .atPoint3(L(Lid))
             ldiff += np.linalg.norm(a-b)
         print(f' - Differences')
-        print(f'\t- landmarks: {ldiff/len(landmarkIdToFrameKeyAndPixel):7.9f}')
-        print(f'\t- poseEyes : {ediff/len(landmarkIdToFrameKeyAndPixel):7.9f}')
+        print(f'\t- landmarks: {ldiff/len(landmarks):7.9f}')
+        print(f'\t- poseEyes : {ediff/len(landmarks):7.9f}')
 
-        self.make_gtsam_viz('initial', origin, [initial,final], frames, pose2frameKey, landmarkIdToFrameKeyAndPixel)
+        self.make_gtsam_viz('initial', origin, [initial,final], frames, pose2frameKey, landmarks)
 
-    def make_gtsam_viz(self, name, origin, valuess, frames, pose2frameKey, landmarkIdToFrameKeyAndPixel):
+    def make_gtsam_viz(self, name, origin, valuess, frames, pose2frameKey, landmarks):
         import matplotlib.pyplot as plt
 
         # Get Ltp matrix
@@ -309,7 +380,7 @@ class Solver:
 
             # Get all landmark pts
             lpts = []
-            for Lid in landmarkIdToFrameKeyAndPixel.keys():
+            for Lid in range(len(landmarks)):
                 LL = values.atPoint3(L(Lid)) + origin
                 p = LL
                 p_local = Ltp.T @ p
@@ -358,8 +429,8 @@ if __name__ == '__main__':
     from omegaconf import OmegaConf
     conf = OmegaConf.create({
         'matcher': {},
-        'input': dict(path='/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', frameStride=8, maxFrames=6),
-        # 'input': dict(path='/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', frameStride=8, maxFrames=25),
+        # 'input': dict(path='/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', frameStride=8, maxFrames=3),
+        'input': dict(path='/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', frameStride=8, maxFrames=25),
         'dtedRayMarcher': dict(dtedPath='/data/elevation/srtm/srtm.fft', iters=25),
         # 'solver': dict(huber=True),
     })
