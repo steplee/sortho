@@ -1,4 +1,4 @@
-from .base import *
+from ..data_model import *
 from sortho.utils.geo import transform_points_epsg
 
 # Unbelievably, flatbuffers generated python code uses a non-relative import, and requires adding the generated package directly to path.
@@ -28,7 +28,7 @@ if 0:
     print(q_to_matrix(q_enu_from_rwf(np.array((1,0,0,0)))))
     exit()
 
-class TerraPixelLoader(BaseLoader):
+class TerraPixelLoader():
     def __init__(self, path, frameStride=1, loadImages=True, maxFrames=0):
         super().__init__()
 
@@ -40,15 +40,10 @@ class TerraPixelLoader(BaseLoader):
         self.nframesIn = 1
         self.nframesOut = 1
 
-    def __iter__(self):
-        self.reader_iter = iter(self.reader)
-        return self
+    def iterFramesWithPosePriors(self):
+        for Ty, buf, sz in self.reader:
 
-    def __next__(self):
-        while True:
-            Ty, buf, sz = next(self.reader_iter)
-
-            if self.maxFrames > 0 and self.nframesOut > self.maxFrames: raise StopIteration()
+            if self.maxFrames > 0 and self.nframesOut > self.maxFrames: return
 
             if Ty == Asd:
                 asd = Ty()
@@ -70,7 +65,7 @@ class TerraPixelLoader(BaseLoader):
                     # Get frame
                     jsf = Ty()
                     jsf.Init(buf, sz)
-                    img = cv2.imdecode(jsf.JpegDataAsNumpy(), cv2.IMREAD_COLOR) if self.loadImages else None
+                    img = cv2.imdecode(jsf.JpegDataAsNumpy(), cv2.IMREAD_COLOR) if self.loadImages else jsf.JpegDataAsNumpy()
                     frame = Frame(jsf.Tstamp(), img, createIntrinFromCamModel(jsf.Cam()), decodeQuat(self.lastAsd.Sq))
 
                     # Get posePrior
@@ -84,14 +79,27 @@ class TerraPixelLoader(BaseLoader):
                     ori_sigma = np.full((3,),.004)
                     pp_sigmas = np.concatenate((ori_sigma, pos_sigma,))
 
-                    return FrameWithPosePrior(frame, pp, pp_sigmas)
+                    yield FrameWithPosePrior(frame, pp, pp_sigmas)
 
 
 if __name__ == '__main__':
 
-    # Quick test.
+    #
+    # Convert to "random access" format.
+    #
 
-    tpl = TerraPixelLoader('/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', loadImages=False)
-    for item in tpl:
-        print(item.posePrior, item.frame.intrin)
-
+    import pickle
+    from omegaconf import OmegaConf
+    conf = OmegaConf.from_cli()
+    with open(conf.output, 'wb') as fp:
+        del conf.output
+        tpl = TerraPixelLoader(**conf, loadImages=False)
+        meta = {}
+        meta['imageCompressionExt'] = '.jpg'
+        meta['framesWithPosePriors'] = list(tpl.iterFramesWithPosePriors())
+        pickle.dump(meta, fp)
+        '''
+        for fwpp in tpl.framesWithPosePriors():
+            frameKey = fwpp.frame.tstamp
+            jpegData = fwpp.frame.img#.tobytes()
+        '''

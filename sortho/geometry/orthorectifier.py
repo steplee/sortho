@@ -245,11 +245,12 @@ if __name__ == '__main__':
     wmPixelLevel = 24
     orth = OrthoRectifier(wmPixelLevel, torch.device('cuda:0'), '/data/elevation/srtm/srtm.fft')
 
-    from sortho.loading.terrapixel import TerraPixelLoader
+    from sortho.loading.random_access import RandomAccessLoader
     from sortho.utils.q import q_to_matrix, q_mult
 
-    tpl = TerraPixelLoader('/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', loadImages=True)
-    for item in tpl:
+
+    loader = RandomAccessLoader('/data/inertialLabs/flightFeb15/sortho.ra', loadImages=True)
+    for item in loader:
         print(item.posePrior, item.frame.intrin)
 
         img = item.frame.img

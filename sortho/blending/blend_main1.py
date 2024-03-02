@@ -1,5 +1,5 @@
 from sortho.geometry.orthorectifier import OrthoRectifier
-from sortho.geometry.utils import get_ltp, to_torch
+from sortho.utils.etc import get_ltp, to_torch
 import sys, os, numpy as np, torch, cv2
 from sortho.utils.q import q_to_matrix, q_mult
 from sortho.utils.etc import format_size
@@ -32,7 +32,6 @@ class UnpackedFrameData:
 
 
 #
-# NOTE: I use the the `frame.tstamp` as the keys for dicts relating to frames
 #
 # NOTE: Vocabulary:
 #             ftd: frame-to-tilerange dict
@@ -45,44 +44,34 @@ class Blender1:
         # self.orthor = OrthoRectifier(conf.wmPixelLevel, torch.device('cuda:0'), conf.dtedPath)
         self.orthor = OrthoRectifier(conf.wmPixelLevel, torch.device('cpu:0'), conf.dtedPath)
         self.blender = get_blender(conf)
+        self.channels = conf.channels
 
         self.weights_blend_filter = make_gauss(21,15)
-        self.skip = conf.input.skip
 
 
     def run(self):
         print(' - Get Frame TileRange Dict')
         ftd = self._get_frame_tilerange_dict()
+        print(ftd)
         print(' - Get InvList')
         tfd = self._get_invlist(ftd)
-        print(' - Naive Get All Image Dict')
-        framed = self._naive_get_all_image_dict()
+        loader = self._get_loader(True)
         print(' - |ftd|:', len(ftd))
         print(' - |tfd|:', len(tfd))
-        self._blend_tiles(tfd,framed, outputPath=self.conf.outputPath)
+        self._blend_tiles(tfd, loader, outputPath=self.conf.outputPath)
 
     def _get_loader(self, loadImages=True):
-        inputPath = self.conf.input.path
-        frameStride = self.conf.input.get('frameStride', 1)
-        from sortho.loading.terrapixel import TerraPixelLoader
-        tpl = TerraPixelLoader(inputPath, frameStride=frameStride, loadImages=loadImages, maxFrames=self.conf.input.maxFrames)
-
-        if self.skip > 0:
-            def skipper():
-                for i,a in enumerate(tpl):
-                    if i > self.skip:
-                        yield a
-            return skipper()
-        else:
-            return tpl
+        from sortho.loading.random_access import RandomAccessLoader
+        loader = RandomAccessLoader(**self.conf.input, loadImages=loadImages)
+        return loader
 
 
     def _get_frame_tilerange_dict(self):
         ftd = {}
-        for fwpp in self._get_loader(loadImages=False):
+        for i,fwpp in enumerate(self._get_loader(loadImages=False).iterFramesWithPosePriors()):
             _, cam_f, cam_c, eye, R_ltp_from_sensor = unpack_frame(fwpp)
             ex = self.orthor.get_extent(cam_f, cam_c, eye, R_ltp_from_sensor)
-            ftd[fwpp.frame.tstamp] = ex
+            ftd[i] = ex
         return ftd
 
     # Return tile-to-frame dict from frame-to-tilerange dict
@@ -96,20 +85,6 @@ class Blender1:
                 if xy not in tfd: tfd[xy] = [k]
                 else:             tfd[xy].append(k)
         return tfd
-
-    # This will run out of mem usually. There's no great way to load images assuming a stream-oriented input.
-    # Making the inputs naturally support random access would be much better.
-    # You can wrap a stream oriented input with a big LRU cache and ask for certain needed frames and hope for the best... might do quite alright.
-    def _naive_get_all_image_dict(self):
-        framed = {}
-        sz = 0
-        for fwpp in self._get_loader(loadImages=True):
-            framed[fwpp.frame.tstamp] = fwpp
-            sz += fwpp.frame.img.nbytes
-            if sz > 8*(1<<30):
-                raise ValueError('Not allowing >8Gb of images in _naive_get_all_image_dict()')
-        print(f' - Naive image dict using {format_size(sz)} bytes')
-        return framed
 
     def _rectify_one_tile_from_one_frame(self, fwpp, tile_xy, pad):
         img, cam_f, cam_c, eye, R_ltp_from_sensor = unpack_frame(fwpp)
@@ -132,7 +107,7 @@ class Blender1:
         w = w1.permute(0,2,3,1)
         return w
 
-    def _blend_tiles(self, tfd, framed, tryShowAll=False, outputPath=None):
+    def _blend_tiles(self, tfd, loader, tryShowAll=False, outputPath=None):
         if len(tfd) < 12*12:
             maxy = max([k[1] for k in tfd.keys()])
             maxx = max([k[0] for k in tfd.keys()])
@@ -144,13 +119,12 @@ class Blender1:
 
         if outputPath:
             from .tiff_tile_writer import TiffTileWriter
-            c = 3
             maxy = max([k[1] for k in tfd.keys()])
             maxx = max([k[0] for k in tfd.keys()])
             miny = min([k[1] for k in tfd.keys()])
             minx = min([k[0] for k in tfd.keys()])
             wmPixelTlbr = np.array((minx,miny,1+maxx,1+maxy)) * 256
-            tileWriter = TiffTileWriter(outputPath, c, self.conf.wmPixelLevel, wmPixelTlbr)
+            tileWriter = TiffTileWriter(outputPath, self.channels, self.conf.wmPixelLevel, wmPixelTlbr)
         else: tileWriter = None
 
         # TODO: multiprocess.pool this
@@ -160,7 +134,7 @@ class Blender1:
         # from multiprocess import Pool
         from tqdm import tqdm
         for tileCoord, frameKeys in tqdm(tfd.items()):
-            frames = [framed[k] for k in frameKeys]
+            frames = [loader[k] for k in frameKeys]
             pad = 16
             srcGrids, imgs = [],[]
             frameHWs = []
@@ -191,6 +165,9 @@ class Blender1:
             if pad > 0: img = img[pad:-pad, pad:-pad]
 
             if tileWriter is not None:
+                if img.ndim == 2: img = img[...,None]
+                if img.shape[2] == 1 and self.channels == 3: img = np.repeat(img,3,2)
+                if img.shape[2] == 3 and self.channels == 1: img = img.astype(np.float32).mean(-1,keepdims=True).astype(np.uint8)
                 tileWriter.writeTile(xx//256,yy//256,img)
 
             if tryShowAll:
@@ -216,12 +193,12 @@ if __name__ == '__main__':
     if 1:
         print('WARNING: fixed tmp config')
         confs = [OmegaConf.create(dict(
-            # input=dict(path='/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', frameStride=8, maxFrames=70, skip=38),
-            input=dict(path='/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', frameStride=8, maxFrames=0, skip=0),
+            input=dict(path='/data/inertialLabs/flightFeb15/sortho.ra', frameStride=1, firstFrame=0),
             dtedPath='/data/elevation/srtm/srtm.fft',
             wmPixelLevel=24,
             blend=dict(kind='lap', k=9, sigma=3.5, nlvl=5),
             outputPath='/tmp/tst.tif',
+            channels=1,
             # blend=dict(kind='simple'),
             # blend=dict(kind='lap', k=15, sigma=4.5, nlvl=5),
             ))]

@@ -1,6 +1,9 @@
 import numpy as np, cv2, os
 from copy import deepcopy
 
+'''
+The only types needed for code shared amongst the `sortho/*` modules and with external inputs.
+'''
 
 class Intrin:
     def __init__(self, wh, f, c, d):
@@ -41,24 +44,4 @@ class FrameWithPosePrior:
         it = deepcopy(self)
         it.frame.img = None
         return it
-
-
-
-class BaseLoader:
-    def __init__(self):
-        pass
-
-    def __len__(self):
-        raise NotImplementedError()
-    def __getitem__(self, i):
-        raise NotImplementedError()
-
-    def __iter__(self,path):
-        self.ii = 0
-        return self
-
-    def __next__(self):
-        self.ii += 1
-        if self.ii >= len(self): raise StopIteration()
-        return self[self.ii-1]
 

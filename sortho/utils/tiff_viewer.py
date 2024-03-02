@@ -17,8 +17,8 @@ class TiffViewer:
         self.W = self.dset.RasterXSize
         self.aspect_wh = self.W/self.H
 
-        self.tlbr = np.array((0,0,self.W-1,self.H-1),dtype=np.float32)
-        self.update()
+        self.tlbr0 = np.array((0,0,self.W-1,self.H-1),dtype=np.float32)
+        self.tlbr  = np.copy(self.tlbr0)
 
     def update(self):
         tlbr = self.tlbr
@@ -42,6 +42,7 @@ class TiffViewer:
             k = chr(cv2.waitKey(0))
             return False, k
         else:
+            if img.ndim == 2: img = img[None]
             img = img.transpose(1,2,0)[...,:3]
             if img.shape[-1] == 3: img = cv2.cvtColor(img,cv2.COLOR_RGB2BGR)
 
@@ -80,6 +81,10 @@ class TiffViewer:
                 d = (tlbr[2:] - tlbr[:2])[1] * .5 * (move_speed)
                 d = np.array((0,d,0,d)) * (1 if key == 'z' else -1)
                 tlbr += d
+
+            if key == 'r':
+                print(' - Resetting')
+                tlbr = np.copy(self.tlbr0)
 
             # if good: self.tlbr = tlbr
             self.tlbr = tlbr

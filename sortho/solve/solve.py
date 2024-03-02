@@ -1,4 +1,5 @@
 import numpy as np, torch
+import pickle
 from gtsam import (Cal3_S2, DoglegOptimizer,
                     GenericProjectionFactorCal3_S2, Marginals,
                     NonlinearFactorGraph, PinholeCameraCal3_S2, Point3,
@@ -13,9 +14,12 @@ X = symbol_shorthand.X
 B = symbol_shorthand.B
 K = symbol_shorthand.K
 
+from sortho.loading.data_model import FrameWithPosePrior, PoseEcef
 from sortho.matching.loftr import LoftrMatcher
 from sortho.utils.etc import get_ltp, rodrigues, to_torch
 from sortho.geometry.ray_march_dted import DtedRayMarcher
+
+assert False, 'even with 3 images -- huge changes -- are intrinsics messed up?'
 
 # def show_matches(imgsa, imgsb, ptsa, ptsb, sigmas): pass
 
@@ -33,6 +37,25 @@ def make_gtsam_pose(pose, sq=None, makeEcef=True, origin=None):
 
     rot = Rot3(R)
     return Pose3(rot, p)
+
+def unmake_gtsam_pose(pose3, sq=None, unmakeEcef=True, origin=None):
+    from sortho.utils.q import matrix_to_q, q_to_matrix
+
+    p = pose3.translation()
+    if origin is not None:
+        p = p + origin
+
+    R = pose3.rotation().matrix()
+
+    if sq is not None:
+        R = R @ q_to_matrix(sq).T
+
+    if unmakeEcef:
+        Ltp = get_ltp(p[None])[0]
+        R = Ltp.T @ R
+
+    return PoseEcef(p, matrix_to_q(R))
+
 
 # Quantize XY keypoints and aggregate them with consistent IDs amongst multiple frames
 # FIXME: Record dict of observations and _SEPERATE_ dict of keypoint locations, prevents need for quantization.
@@ -138,16 +161,13 @@ class Solver:
         self.conf = conf
         self.matcher = LoftrMatcher(**conf.matcher)
         self.dtedRayMarcher = DtedRayMarcher(**conf.dtedRayMarcher)
+        self.show = conf.show
 
 
-    # NOTE: This may be called multiple times. This is preferred to calling it once and caching images, because
-    #       that'd require potentially lots of RAM for storing decoded images.
     def get_loader(self, loadImages=True):
-        inputPath = self.conf.input.path
-        frameStride = self.conf.input.get('frameStride', 1)
-        from sortho.loading.terrapixel import TerraPixelLoader
-        tpl = TerraPixelLoader(inputPath, frameStride=frameStride, loadImages=loadImages, maxFrames=self.conf.input.maxFrames)
-        return tpl
+        from sortho.loading.random_access import RandomAccessLoader
+        loader = RandomAccessLoader(**self.conf.input, loadImages=loadImages)
+        return loader
 
     def get_matches(self):
         hist = [] # Store recent fwpp in a deque
@@ -233,7 +253,8 @@ class Solver:
         initial = Values()
         graph = NonlinearFactorGraph()
 
-        pose2frameKey = {}
+        # pose2frameKey = {}
+        poseKeys = []
         # frameKeyAndPixelToLandmarkId = {}
         # landmarkIdToFrameKeyAndPixel = {}
 
@@ -272,8 +293,10 @@ class Solver:
                 pp_sigmas = fwpp.posePriorSigmas
                 # pp_sigmas *= 10 # WARNING:
                 print('pp_sigma', pp_sigmas)
-                Xid = len(pose2frameKey)
-                pose2frameKey[Xid] = k
+                # Xid = len(pose2frameKey)
+                # pose2frameKey[Xid] = k
+                Xid = k
+                poseKeys.append(Xid)
                 XX = make_gtsam_pose(pp, makeEcef=True, sq=fwpp.frame.sq, origin=origin)
                 posePriorFactors.append(PriorFactorPose3(X(Xid), XX, noiseModel.Isotropic.Sigmas(pp_sigmas)))
                 graph.add(posePriorFactors[-1])
@@ -342,7 +365,7 @@ class Solver:
         printErrs(final)
 
         ediff, ldiff = 0, 0
-        for Xid in pose2frameKey.keys():
+        for Xid in poseKeys:
             a = initial.atPose3(X(Xid)).translation()
             b = final  .atPose3(X(Xid)).translation()
             ediff += np.linalg.norm(a-b)
@@ -354,9 +377,12 @@ class Solver:
         print(f'\t- landmarks: {ldiff/len(landmarks):7.9f}')
         print(f'\t- poseEyes : {ediff/len(landmarks):7.9f}')
 
-        self.make_gtsam_viz('initial', origin, [initial,final], frames, pose2frameKey, landmarks)
+        self.write_output(final, graph, poseKeys, origin)
 
-    def make_gtsam_viz(self, name, origin, valuess, frames, pose2frameKey, landmarks):
+        if self.show:
+            self.make_gtsam_viz('initial', origin, [initial,final], frames, poseKeys, landmarks)
+
+    def make_gtsam_viz(self, name, origin, valuess, frames, poseKeys, landmarks):
         import matplotlib.pyplot as plt
 
         # Get Ltp matrix
@@ -370,7 +396,7 @@ class Solver:
 
             # Get all optical centers
             octrs = []
-            for Xid in pose2frameKey.keys():
+            for Xid in poseKeys:
                 XX = values.atPose3(X(Xid))
                 p = XX.translation() + origin
                 print(label,Xid,XX.translation(), p)
@@ -425,14 +451,41 @@ class Solver:
             return None
         return ptsa,ptsb,sigma
 
+    def write_output(self, final, graph, poseKeys, origin):
+        meta = {}
+        meta['imageCompressionExt'] = '.jpg'
+        fwpps = []
+
+        marginals = Marginals(graph, final)
+
+        for i,fwpp0 in enumerate(self.get_loader(False)):
+            # Xid = frameKey2poseKey[fwpp0.frame.tstamp]
+            Xid = i
+            pp = unmake_gtsam_pose(final.atPose3(X(Xid)), sq=fwpp0.frame.sq, origin=origin)
+            print(fwpp0.posePrior, '->', pp)
+            pp_sigmas = np.diagonal(marginals.marginalCovariance(X(Xid)))
+            fwpps.append(FrameWithPosePrior(fwpp0.frame, pp, pp_sigmas))
+
+        meta['framesWithPosePriors'] = list(fwpps)
+        with open(self.conf.outputPath,'wb') as fp:
+            pickle.dump(meta, fp)
+        print(f' - Wrote \'{self.conf.outputPath}\'')
+
+
 if __name__ == '__main__':
     from omegaconf import OmegaConf
     conf = OmegaConf.create({
         'matcher': {},
-        # 'input': dict(path='/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', frameStride=8, maxFrames=3),
-        'input': dict(path='/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin', frameStride=8, maxFrames=25),
+        'input': {},
+        # 'input': dict(path='/data/inertialLabs/flightFeb15/sortho.ra', frameStride=8, maxFrames=25),
+        # 'input': dict(path='/data/inertialLabs/flightFeb15/sortho.ra', frameStride=8, maxFrames=8),
+        # 'input': dict(path='/data/inertialLabs/flightFeb15/sortho.ra', frameStride=8, maxFrames=5),
         'dtedRayMarcher': dict(dtedPath='/data/elevation/srtm/srtm.fft', iters=25),
+        'outputPath': '/data/inertialLabs/flightFeb15/sortho.opt.ra',
+        'show': False,
         # 'solver': dict(huber=True),
     })
+    conf1 = OmegaConf.from_cli()
+    conf = OmegaConf.merge(conf,conf1)
     s = Solver(conf)
     s.run()

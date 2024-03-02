@@ -31,3 +31,7 @@ def q_to_matrix(q):
         1-2*(j*j+k*k), 2*(i*j-k*r), 2*(i*k+j*r),
         2*(i*j+k*r), 1-2*(i*i+k*k), 2*(j*k-i*r),
         2*(i*k-j*r), 2*(j*k+i*r), 1-2*(i*i+j*j))).reshape(3,3)
+
+# FIXME: Any more accurate way to do this
+def matrix_to_q(R):
+    return q_exp(log_R(R))
