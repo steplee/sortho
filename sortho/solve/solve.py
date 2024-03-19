@@ -19,7 +19,7 @@ from sortho.matching.loftr import LoftrMatcher
 from sortho.utils.etc import get_ltp, rodrigues, to_torch
 from sortho.geometry.ray_march_dted import DtedRayMarcher
 
-assert False, 'even with 3 images -- huge changes -- are intrinsics messed up?'
+# assert False, 'even with 3 images -- huge changes -- are intrinsics messed up?'
 
 # def show_matches(imgsa, imgsb, ptsa, ptsb, sigmas): pass
 
@@ -283,6 +283,7 @@ class Solver:
 
                 # If created new camera model, add prior on it.
                 if Knew:
+                    print(' - new cam:', Kid, KK)
                     cam_prior_noise = np.array((30,30, 1e-5, 10,10.))
                     graph.add(PriorFactorCal3_S2(K(Kid), KK, noiseModel.Isotropic.Sigmas(cam_prior_noise)))
                     initial.insert(K(Kid), KK)
@@ -462,7 +463,7 @@ class Solver:
             # Xid = frameKey2poseKey[fwpp0.frame.tstamp]
             Xid = i
             pp = unmake_gtsam_pose(final.atPose3(X(Xid)), sq=fwpp0.frame.sq, origin=origin)
-            print(fwpp0.posePrior, '->', pp)
+            print('pos change:', np.linalg.norm(fwpp0.posePrior.pos - pp.pos))
             pp_sigmas = np.diagonal(marginals.marginalCovariance(X(Xid)))
             fwpps.append(FrameWithPosePrior(fwpp0.frame, pp, pp_sigmas))
 

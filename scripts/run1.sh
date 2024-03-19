@@ -9,7 +9,7 @@ OPT_TIFF='/tmp/sorthoData1/opt.tif'
 
 frameStride=8
 maxFrames=10
-maxFrames=3
+maxFrames=30
 
 if [ ! -f ${RA_RAW_DATA} ]; then
     python3 -m sortho.loading.converters.terrapixel path='/data/inertialLabs/flightFeb15/irnOutput/1707947224/eval.bin' output=${RA_RAW_DATA} frameStride=${frameStride} maxFrames=${maxFrames}
