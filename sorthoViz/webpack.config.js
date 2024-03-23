@@ -1,7 +1,14 @@
-const path = require('path');
-const HtmlWebpackPlugin = require('html-webpack-plugin');
+// const path = require('path');
+// const HtmlWebpackPlugin = require('html-webpack-plugin');
+import path from 'path';
+import HtmlWebpackPlugin from 'html-webpack-plugin';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
-module.exports = function(env, argv) {
+import { setupDummyMiddlewares } from './src/example_server/serve.js';
+
+export default function(env, argv) {
 	console.log('production build = ', env.production);
 
 	return {
@@ -31,7 +38,7 @@ module.exports = function(env, argv) {
 
 			// NOTE: install our example server endpoints into the dev server
 			setupMiddlewares: (middlewares, devServer) => {
-				return require('./src/example_server/serve.js').setupDummyMiddlewares(middlewares, devServer);
+				return setupDummyMiddlewares(middlewares, devServer);
 			},
 		},
 

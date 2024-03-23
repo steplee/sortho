@@ -2,7 +2,7 @@
 import m from "mithril";
 import "./main.css";
 
-import Scene from "./scene.js";
+import Scene from "./threed/scene.js";
 
 var root = document.body
 
